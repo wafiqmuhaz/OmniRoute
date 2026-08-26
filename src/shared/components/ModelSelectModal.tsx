@@ -331,9 +331,19 @@ export default function ModelSelectModal({
           providerId
         ).filter((am) => !isHiddenForProvider(am.id));
 
+        // Fallback: if no user aliases exist, pull models from the provider registry
+        const registryModels = aliasModels.length === 0
+          ? (getModelsByProviderId(providerId) || []).map((m) => ({
+              id: m.id,
+              name: m.name || m.id,
+              value: `${alias}/${m.id}`,
+              source: "registry" as const,
+            })).filter((rm) => !isHiddenForProvider(rm.id))
+          : [];
+
         // Merge custom models for passthrough providers
         const customEntries = providerCustomModels
-          .filter((cm) => !aliasModels.some((am) => am.id === cm.id))
+          .filter((cm) => !aliasModels.some((am) => am.id === cm.id) && !registryModels.some((rm) => rm.id === cm.id))
           .filter((cm) => !isHiddenForProvider(cm.id))
           .map((cm) => ({
             id: cm.id,
@@ -343,7 +353,7 @@ export default function ModelSelectModal({
             source: normalizeModelCatalogSource(cm.source) === "imported" ? "imported" : "custom",
           }));
 
-        const allModels = [...aliasModels, ...customEntries];
+        const allModels = [...aliasModels, ...registryModels, ...customEntries];
 
         if (allModels.length > 0) {
           const matchedNode = providerNodes.find((node) => node.id === providerId);

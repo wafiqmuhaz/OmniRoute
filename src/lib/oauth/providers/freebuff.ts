@@ -1,105 +1,153 @@
+import { randomUUID } from "node:crypto";
 import { FREEBUFF_CONFIG } from "../constants/oauth";
 
 /**
- * Freebuff (Codebuff) OAuth Provider — Custom Device Code Flow.
+ * Freebuff (Codebuff) OAuth Provider — Fingerprint Device Code Flow.
  *
- * Freebuff is a free, ad-supported coding assistant by Codebuff. Authentication
- * uses a custom device code flow via freebuff.com (NOT OAuth2 standard).
+ * NOT OAuth2 standard. Uses a fingerprint-based device flow:
+ * 1) POST {baseUrl}/api/auth/cli/code { fingerprintId }
+ *    → { fingerprintId, fingerprintHash, loginUrl, expiresAt }
+ * 2) User opens loginUrl in browser and signs in
+ * 3) GET {baseUrl}/api/auth/cli/status?fingerprintId=..&fingerprintHash=..&expiresAt=..
+ *    → { user: { id, email, name, authToken } } once authorized
  *
- * Flow:
- *   1. POST https://freebuff.com/api/auth/cli/code → { code, url }
- *   2. Open loginUrl in browser for user authentication
- *   3. Poll https://freebuff.com/api/auth/cli/status until authenticated
- *   4. Returns { authToken, user } — authToken is used as Bearer token
- *
- * API calls go to https://www.codebuff.com/api/v1/*
+ * The resulting user.authToken is the Bearer token used against
+ * https://www.codebuff.com/api/v1/chat/completions
  */
-type FreebuffConfig = typeof FREEBUFF_CONFIG;
 
-interface FreebuffDeviceCodeResponse {
-  code: string;
-  url: string;
+const LOGIN_HOST = "https://freebuff.com";
+
+interface FreebuffConfig {
+  baseUrl?: string;
+  loginCodePath?: string;
+  loginStatusPath?: string;
+  oauthTimeoutMs?: number;
 }
 
 interface FreebuffTokenResponse {
-  authToken: string;
-  user?: {
-    id: string;
-    username?: string;
-  };
-}
-
-interface FreebuffPollResult {
-  ok: boolean;
-  data: FreebuffTokenResponse | { error?: string };
+  access_token: string;
+  id?: string;
+  email?: string;
+  name?: string;
+  fingerprintId?: string;
 }
 
 export const freebuff = {
   config: FREEBUFF_CONFIG,
   flowType: "device_code" as const,
 
-  requestDeviceCode: async (_config: FreebuffConfig): Promise<FreebuffDeviceCodeResponse> => {
-    const response = await fetch(FREEBUFF_CONFIG.loginCodeUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({}),
-    });
+  requestDeviceCode: async (config: FreebuffConfig) => {
+    const fingerprintId = randomUUID();
+    const baseUrl = (config.baseUrl || LOGIN_HOST).replace(/\/$/, "");
+    const response = await fetch(
+      `${baseUrl}${config.loginCodePath || "/api/auth/cli/code"}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          "User-Agent": "codebuff-cli/0.0.138",
+        },
+        body: JSON.stringify({ fingerprintId }),
+      }
+    );
 
     if (!response.ok) {
-      const err = await response.text().catch(() => "Unknown error");
-      throw new Error(`Freebuff device code request failed (${response.status}): ${err}`);
+      const error = await response.text();
+      throw new Error(`Freebuff login code request failed: ${error}`);
     }
 
-    const data = (await response.json()) as FreebuffDeviceCodeResponse;
-    if (!data.code || !data.url) {
-      throw new Error(`Freebuff device code error: invalid response ${JSON.stringify(data)}`);
-    }
+    const data = await response.json();
+    const loginUrl = typeof data.loginUrl === "string" ? data.loginUrl : "";
+    const authCode = loginUrl.match(/auth_code=([^&]+)/)?.[1] || "";
+    const expiresAt = Number(data.expiresAt) || 0;
+
+    const timeoutSec = Math.max(60, Math.floor((config.oauthTimeoutMs || 300000) / 1000));
+    const serverMs =
+      Number.isFinite(expiresAt) && expiresAt > 0 ? expiresAt - Date.now() : timeoutSec * 1000;
+    const expiresIn = Math.max(60, Math.min(Math.floor(serverMs / 1000), timeoutSec));
 
     return {
-      code: data.code,
-      url: data.url,
+      // fingerprintId + fingerprintHash + expiresAt travel inside device_code;
+      // pollToken decodes them for /api/auth/cli/status.
+      device_code: JSON.stringify({
+        fingerprintId: data.fingerprintId || fingerprintId,
+        fingerprintHash: data.fingerprintHash,
+        expiresAt,
+      }),
+      user_code: authCode || "",
+      verification_uri: loginUrl,
+      verification_uri_complete: loginUrl,
+      expires_in: expiresIn,
+      interval: 5,
     };
   },
 
-  pollToken: async (_config: FreebuffConfig, deviceCode: string): Promise<FreebuffPollResult> => {
-    const response = await fetch(FREEBUFF_CONFIG.loginStatusUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({ code: deviceCode }),
-    });
+  pollToken: async (config: FreebuffConfig, deviceCode: string) => {
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(deviceCode) || {};
+    } catch {
+      parsed = {};
+    }
+    const { fingerprintId, fingerprintHash, expiresAt } = parsed as {
+      fingerprintId: string;
+      fingerprintHash: string;
+      expiresAt: number;
+    };
 
-    if (!response.ok) {
-      return { ok: false, data: { error: `request_failed_${response.status}` } };
+    if (!fingerprintId || !fingerprintHash || !expiresAt) {
+      return { ok: true, data: { error: "authorization_pending" } };
     }
 
-    const data = (await response.json()) as FreebuffTokenResponse | { error?: string };
+    const baseUrl = (config.baseUrl || LOGIN_HOST).replace(/\/$/, "");
+    const query = new URLSearchParams({
+      fingerprintId,
+      fingerprintHash,
+      expiresAt: String(expiresAt),
+    });
 
-    // Freebuff returns { authToken } when authenticated, or { error } when pending
-    if ("authToken" in data && data.authToken) {
+    const response = await fetch(
+      `${baseUrl}${config.loginStatusPath || "/api/auth/cli/status"}?${query.toString()}`,
+      {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          "User-Agent": "codebuff-cli/0.0.138",
+        },
+      }
+    );
+
+    let data: Record<string, unknown>;
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+
+    const user = data?.user as Record<string, unknown> | undefined;
+    if (user?.authToken) {
       return {
         ok: true,
         data: {
-          authToken: data.authToken,
-          user: data.user,
+          access_token: user.authToken as string,
+          ...user,
         },
       };
     }
 
-    return { ok: false, data };
+    return { ok: true, data: { error: "authorization_pending" } };
   },
 
   mapTokens: (tokens: FreebuffTokenResponse) => ({
-    accessToken: tokens.authToken,
-    refreshToken: "",
-    expiresIn: 0,
+    accessToken: tokens.access_token,
+    refreshToken: null,
+    email: tokens.email || undefined,
+    displayName: tokens.name || undefined,
     providerSpecificData: {
-      user: tokens.user,
+      authMethod: "device_code",
+      fingerprintId: tokens.fingerprintId || null,
+      userId: tokens.id || null,
     },
   }),
 };

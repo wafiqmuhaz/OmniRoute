@@ -158,7 +158,8 @@ export async function validateFreebuffProvider({ apiKey }: { apiKey: string }) {
       signal: AbortSignal.timeout(15000),
     });
 
-    if (res.ok || res.status === 409) {
+    if (res.ok || res.status === 409 || res.status === 429) {
+      // 429 = rate-limited but token is valid; don't mark as failed
       return { valid: true, error: null };
     }
     if (res.status === 401 || res.status === 403) {

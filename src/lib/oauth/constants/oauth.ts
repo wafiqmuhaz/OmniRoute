@@ -502,8 +502,9 @@ export const ZED_HOSTED_CONFIG = {
 //
 // API calls go to https://www.codebuff.com/api/v1/*
 export const FREEBUFF_CONFIG = {
-  loginCodeUrl: "https://freebuff.com/api/auth/cli/code",
-  loginStatusUrl: "https://freebuff.com/api/auth/cli/status",
+  baseUrl: "https://freebuff.com",
+  loginCodePath: "/api/auth/cli/code",
+  loginStatusPath: "/api/auth/cli/status",
   oauthTimeoutMs: 300000,
 };
 

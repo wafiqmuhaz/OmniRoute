@@ -20,10 +20,11 @@ _tasks/
 .tests/**
 .coverage/**
 /coverage/
-.dist/**
+# .dist/**
 .next/**
 .build/**
 .out/**
+.dist/node_modules/**
 
 # Stryker mutation testing — ephemeral sandbox + generated reports (never commit)
 .stryker-tmp/
@@ -136,11 +137,12 @@ backup/
 # Layer 1: Next.js now writes to .build/next (was .next); assembled bundle → dist/
 # (Previously /app/ was the standalone output; renamed to /dist/ in Layer 1.)
 /.build/
-/dist/
+# /dist/
+/dist/.build/
 /.next/
 
 # Electron
-electron/dist-electron/
+# electron/dist-electron/
 electron/node_modules/
 icon.iconset/
 
